@@ -25,9 +25,11 @@ import { SidebarLayout } from './SidebarLayout';
 import { useClientNavigation } from '../lib/navigation';
 import { WorkoutProgramModal } from './WorkoutProgramModal';
 import { MeasurementsInputModal } from './MeasurementsInputModal';
-import { AuthService, ClientService, WorkoutService, MeasurementService } from '../services';
+import { AuthService, ClientService, WorkoutService, MeasurementService, ActivityService } from '../services';
 import { Program, WorkoutStats } from '../types/workout.types';
 import { UserStats } from '../types/achievement.types';
+import { ActivityStats } from '../types/activity.types';
+import { MeasurementStats } from '../types/measurement.types';
 
 interface Exercise {
   id: string;
@@ -143,102 +145,16 @@ export function ClientDashboard() {
     setShowMeasurementsModal(true);
   };
 
-  
   // Функция для получения статистики тренировок
   const fetchWorkoutStats = async (clientId: string) => {
     try {
-      // Получаем тренировки клиента
-      const { data: workouts, error: workoutsError } = await supabase
-        .from('workouts')
-        .select('id, start_time')
-        .eq('client_id', clientId);
-
-      if (workoutsError) throw workoutsError;
-
-      // Получаем завершенные тренировки
-      const { data: completions, error: completionsError } = await supabase
-        .from('workout_completions')
-        .select('*')
-        .eq('client_id', clientId)
-        .eq('completed', true);
-
-      if (completionsError) throw completionsError;
-
-      // Получаем выполненные упражнения для расчета общего объема
-      const { data: exerciseCompletions, error: exerciseError } = await supabase
-        .from('exercise_completions')
-        .select('*')
-        .eq('client_id', clientId);
-
-      if (exerciseError) throw exerciseError;
-
-      // Расчет общего объема тренировок (вес × повторения)
-      let totalVolume = 0;
-
-      if (exerciseCompletions && exerciseCompletions.length > 0) {
-        // Получаем данные о подходах для расчета объема
-        const workoutIds = completions?.map(c => c.workout_id) || [];
-        
-        const { data: workoutDetails } = await supabase
-          .from('workouts')
-          .select('id, training_program_id')
-          .in('id', workoutIds);
-        
-        const programIds = workoutDetails
-          ?.map(w => w.training_program_id)
-          .filter(Boolean) || [];
-        
-        const { data: programExercises } = await supabase
-          .from('program_exercises')
-          .select(`
-            exercise_id,
-            exercise_sets (set_number, reps, weight)
-          `)
-          .in('program_id', programIds);
-        
-        // Подсчет общего объема
-        if (programExercises) {
-          exerciseCompletions.forEach(completion => {
-            if (completion.completed_sets && Array.isArray(completion.completed_sets)) {
-              const exercise = programExercises.find(pe => pe.exercise_id === completion.exercise_id);
-              
-              if (exercise && exercise.exercise_sets) {
-                completion.completed_sets.forEach((isCompleted, index) => {
-                  if (isCompleted && exercise.exercise_sets[index]) {
-                    const set = exercise.exercise_sets[index];
-                    // Парсим повторения (может быть диапазон "8-12")
-                    let reps = 0;
-                    if (set.reps) {
-                      const repsStr = set.reps.toString();
-                      if (repsStr.includes('-')) {
-                        const [min, max] = repsStr.split('-').map(Number);
-                        reps = Math.round((min + max) / 2);
-                      } else {
-                        reps = parseInt(repsStr) || 0;
-                      }
-                    }
-                    
-                    // Парсим вес
-                    const weight = parseFloat(set.weight || '0') || 0;
-                    
-                    // Добавляем к общему объему
-                    totalVolume += reps * weight;
-                  }
-                });
-              }
-            }
-          });
-        }
-      }
-
+      // Получаем статистику тренировок через сервис
+      const workoutStats = await WorkoutService.getClientWorkoutStats(clientId);
+      
       // Обновляем статистику тренировок
       setUserStats(prev => ({
         ...prev,
-        workouts: {
-          totalCount: workouts?.length || 0,
-          completedCount: completions?.length || 0,
-          totalVolume: Math.round(totalVolume) // Округляем до целого числа кг
-        }
+        workouts: workoutStats
       }));
     } catch (error) {
       console.error('Error fetching workout stats:', error);
@@ -248,37 +164,13 @@ export function ClientDashboard() {
   // Функция для получения статистики активности
   const fetchActivityStats = async (clientId: string) => {
     try {
-      // Получаем данные о бытовой активности
-      const { data: activities, error: activitiesError } = await supabase
-        .from('client_activities')
-        .select('*')
-        .eq('client_id', clientId);
-
-      if (activitiesError) throw activitiesError;
-
-      // Подсчет общего времени и группировка по типам
-      let totalMinutes = 0;
-      const activityTypes: {[key: string]: number} = {};
-
-      if (activities) {
-        activities.forEach(activity => {
-          totalMinutes += activity.duration_minutes;
-          
-          // Группируем по типам активности
-          if (!activityTypes[activity.activity_type]) {
-            activityTypes[activity.activity_type] = 0;
-          }
-          activityTypes[activity.activity_type] += activity.duration_minutes;
-        });
-      }
-
+      // Получаем статистику активности через сервис
+      const activityStats = await ActivityService.getClientActivityStats(clientId);
+      
       // Обновляем статистику активности
       setUserStats(prev => ({
         ...prev,
-        activities: {
-          totalMinutes,
-          types: activityTypes
-        }
+        activities: activityStats
       }));
     } catch (error) {
       console.error('Error fetching activity stats:', error);
@@ -288,36 +180,16 @@ export function ClientDashboard() {
   // Функция для получения статистики измерений
   const fetchMeasurementStats = async (clientId: string) => {
     try {
-      // Получаем данные о замерах, отсортированные по дате
-      const { data: measurements, error: measurementsError } = await supabase
-        .from('client_measurements')
-        .select('*')
-        .eq('client_id', clientId)
-        .order('date', { ascending: true });
-
-      if (measurementsError) throw measurementsError;
-
-      // Вычисляем начальный и текущий вес, а также изменение
-      let initialWeight = null;
-      let currentWeight = null;
-      let weightChange = null;
-
-      if (measurements && measurements.length > 0) {
-        initialWeight = measurements[0].weight;
-        currentWeight = measurements[measurements.length - 1].weight;
-        
-        if (initialWeight !== null && currentWeight !== null) {
-          weightChange = currentWeight - initialWeight;
-        }
-      }
-
+      // Получаем статистику измерений через сервис
+      const measurementStats = await MeasurementService.getClientMeasurementStats(clientId);
+      
       // Обновляем статистику измерений
       setUserStats(prev => ({
         ...prev,
         measurements: {
-          initialWeight,
-          currentWeight,
-          weightChange
+          initialWeight: measurementStats.initialWeight,
+          currentWeight: measurementStats.currentWeight,
+          weightChange: measurementStats.weightChange
         }
       }));
     } catch (error) {
@@ -366,8 +238,7 @@ export function ClientDashboard() {
   
   const handleLogout = async () => {
     try {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
+      await AuthService.signOut();
       navigate('/login');
     } catch (error: any) {
       console.error('Error signing out:', error);
